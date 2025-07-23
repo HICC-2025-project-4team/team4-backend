@@ -43,7 +43,7 @@ INSTALLED_APPS = [
     'transcripts',
     'analysis',
     'semesters',
-
+    'rest_framework_simplejwt.token_blacklist',
 ]
 
 MIDDLEWARE = [
