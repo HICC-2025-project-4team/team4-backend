@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.exceptions import AuthenticationFailed, NotAuthenticated
 
 from .models import User
 from .serializers import SignupSerializer, UserSerializer, CustomTokenObtainPairSerializer
@@ -66,15 +66,35 @@ class LogoutView(APIView):
                 {'detail': '유효하지 않은 토큰입니다.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        return Response(status=status.HTTP_205_RESET_CONTENT)
+        return Response(
+            {'message': '성공적으로 로그아웃 되었습니다.'},
+            status=status.HTTP_200_OK
+            )
 
 # 내 정보 조회
 class MeView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = UserSerializer
 
-    def get_object(self):
-        return self.request.user
+    def get(self, request, *args, **kwargs):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return Response(
+                {"detail": "로그인이 필요합니다."},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        sid = request.query_params.get('student_id')
+
+        if sid.upper() != user.student_id:
+            return Response(
+                {"detail": "해당 학번의 사용자를 찾을 수 없습니다."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        data = self.get_serializer(user).data
+        return Response(data, status=status.HTTP_200_OK)
+    
 
 # 내 정보 수정 (full_name, current_year 등)
 class UpdateProfileView(generics.UpdateAPIView):
