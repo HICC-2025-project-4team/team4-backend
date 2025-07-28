@@ -1,0 +1,12 @@
+Django>=4.2,<4.3
+djangorestframework
+djangorestframework-simplejwt
+django-cors-headers
+Pillow
+celery
+django-celery-results
+django-celery-beat
+paddlepaddle       # CPU 전용: paddlepaddle, GPU 전용은 paddlepaddle-gpu
+paddleocr
+psycopg2-binary    # PostgreSQL 드라이버
+requests

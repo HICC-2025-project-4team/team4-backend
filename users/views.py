@@ -12,6 +12,26 @@ class SignupView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = SignupSerializer
 
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+
+        if not serializer.is_valid():
+            # 에러 dict 예시: {'current_year': ['현재 학년을 입력해주세요.'], 'major': …}
+            errors = serializer.errors
+            field, messages = next(iter(errors.items()))  # 첫 번째 필드와 메시지 리스트
+            return Response(
+                {'error_message': messages[0]},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        user = serializer.save()
+        return Response(
+            {
+                "message": "회원가입 성공",
+                "user_id": user.id
+            },
+            status=status.HTTP_201_CREATED
+        )
+
 # JWT 로그인 (access/refresh 토큰 발급)
 class LoginView(TokenObtainPairView):
     # 기본 TokenObtainPairSerializer를 사용
