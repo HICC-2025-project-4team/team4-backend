@@ -33,16 +33,25 @@ class SignupSerializer(serializers.ModelSerializer):
         error_messages={
             'required': '전공을 입력해주세요.'}
     )
+    password = serializers.CharField(
+        write_only=True,
+        min_length=8,
+        error_messages={
+            'min_length': '비밀번호는 최소 8자 이상이어야 합니다.',
+            'blank': '비밀번호를 입력해주세요.'
+        }
+    )
 
     class Meta:
         model = User
-        fields = ['student_id', 'full_name', 'current_year', 'major']
+        fields = ['student_id', 'full_name', 'current_year', 'major', 'password']
 
     def validate_student_id(self, value):
         # API 레벨에서 대문자로 정규화
         return value.upper()
 
     def create(self, validated_data):
+        pwd = validated_data.pop('password')
         user = User(
             student_id=validated_data['student_id'],
             full_name=validated_data['full_name'],
@@ -50,7 +59,7 @@ class SignupSerializer(serializers.ModelSerializer):
             major=validated_data['major'],
             username=validated_data['student_id'],
         )
-        user.set_unusable_password()
+        user.set_password(pwd)
         user.save()
         return user
 
