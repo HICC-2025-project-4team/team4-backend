@@ -67,11 +67,29 @@ class SignupSerializer(serializers.ModelSerializer):
         return user
 
 class UserSerializer(serializers.ModelSerializer):
+    # write_only으로만 받고, 응답엔 포함되지 않습니다
+    password = serializers.CharField(
+        write_only=True,
+        required=False,
+        min_length=8,
+        error_messages={'min_length': '비밀번호는 최소 8자 이상이어야 합니다.'}
+    )
+
     class Meta:
         model = User
-        # 토큰 발급 시 payload 에 student_id, full_name 이 포함됩니다.
-        fields = ['student_id', 'full_name', 'current_year', 'major']
-        read_only_fields = ['student_id']  # student_id 는 수정 불가
+        fields = ['student_id', 'full_name', 'current_year', 'major', 'password']
+        read_only_fields = ['student_id']
+
+    def update(self, instance, validated_data):
+        # 1) password 처리
+        pwd = validated_data.pop('password', None)
+        # 2) 나머지 필드 업데이트
+        instance = super().update(instance, validated_data)
+        # 3) 비밀번호가 들어왔으면 set_password
+        if pwd:
+            instance.set_password(pwd)
+            instance.save()
+        return instance
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
