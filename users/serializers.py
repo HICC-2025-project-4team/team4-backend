@@ -13,6 +13,7 @@ class SignupSerializer(serializers.ModelSerializer):
         validators=[
             UniqueValidator(
                 queryset=User.objects.all(),
+                lookup='iexact',
                 message='이미 존재하는 학번입니다.'
             )
         ]
@@ -94,7 +95,7 @@ class UserSerializer(serializers.ModelSerializer):
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
-        student_id = attrs.get('student_id')
+        student_id = attrs.get('student_id').upper()
         password   = attrs.get('password')
 
         # 1) 실제 인증 시도
@@ -105,6 +106,8 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 raise AuthenticationFailed('비밀번호를 잘못 입력하셨습니다.')
             else:
                 raise AuthenticationFailed('존재하지 않는 회원입니다.')
+
+        attrs['student_id'] = student_id
 
         # 3) 기본 토큰 발급 로직
         return super().validate(attrs)
