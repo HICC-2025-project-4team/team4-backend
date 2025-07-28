@@ -3,9 +3,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework.exceptions import AuthenticationFailed
 
 from .models import User
-from .serializers import SignupSerializer, UserSerializer
+from .serializers import SignupSerializer, UserSerializer, CustomTokenObtainPairSerializer
 
 # 회원가입(student_id, full_name)
 class SignupView(generics.CreateAPIView):
@@ -34,11 +35,18 @@ class SignupView(generics.CreateAPIView):
 
 # JWT 로그인 (access/refresh 토큰 발급)
 class LoginView(TokenObtainPairView):
-    # 기본 TokenObtainPairSerializer를 사용
-    pass
+    serializer_class = CustomTokenObtainPairSerializer
 
-# JWT refresh (optional)
-# from rest_framework_simplejwt.views import TokenRefreshView
+    def post(self, request, *args, **kwargs):
+        try:
+            # 정상적인 경우 super() 안에서 serializer.validate() → 토큰 리턴
+            return super().post(request, *args, **kwargs)
+        except AuthenticationFailed as e:
+            # 커스터마이징한 메시지를 key를 바꿔 반환하고 싶다면 여기서 처리
+            return Response(
+                {'error': str(e.detail)}, 
+                status=status.HTTP_401_UNAUTHORIZED
+            )
 
 # 로그아웃: refresh token을 블랙리스트 처리
 class LogoutView(APIView):

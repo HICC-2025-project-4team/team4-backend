@@ -1,6 +1,9 @@
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from django.contrib.auth import authenticate
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 from .models import User
+from rest_framework.exceptions import AuthenticationFailed
 
 class SignupSerializer(serializers.ModelSerializer):
     student_id = serializers.RegexField(
@@ -69,3 +72,21 @@ class UserSerializer(serializers.ModelSerializer):
         # 토큰 발급 시 payload 에 student_id, full_name 이 포함됩니다.
         fields = ['student_id', 'full_name', 'current_year', 'major']
         read_only_fields = ['student_id']  # student_id 는 수정 불가
+
+
+class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    def validate(self, attrs):
+        student_id = attrs.get('student_id')
+        password   = attrs.get('password')
+
+        # 1) 실제 인증 시도
+        user = authenticate(username=student_id, password=password)
+        if user is None:
+            # 2) 학번만 있는지 확인
+            if User.objects.filter(student_id__iexact=student_id).exists():
+                raise AuthenticationFailed('비밀번호를 잘못 입력하셨습니다.')
+            else:
+                raise AuthenticationFailed('존재하지 않는 회원입니다.')
+
+        # 3) 기본 토큰 발급 로직
+        return super().validate(attrs)
