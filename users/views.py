@@ -101,5 +101,26 @@ class UpdateProfileView(generics.UpdateAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = UserSerializer
 
+    def patch(self, request, *args, **kwargs):
+        user = request.user
+
+       # 1) URL 쿼리 student_id 검사
+        sid = request.query_params.get('student_id')
+        if not sid or sid.upper() != user.student_id:
+            return Response(
+                {"detail": "해당 학번의 사용자를 찾을 수 없습니다."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # 2) 수정 불가 필드 검사
+        if 'student_id' in request.data:
+            return Response(
+                {"error": "수정할 수 없는 필드가 포함되어 있습니다."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 3) 그 외에는 부분 업데이트 실행
+        return super().partial_update(request, *args, **kwargs)
+    
     def get_object(self):
         return self.request.user
