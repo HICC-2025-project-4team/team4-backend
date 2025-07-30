@@ -1,24 +1,23 @@
 from celery import shared_task
 from .models import Transcript
+from .utils import run_ocr, parse_text  # 예시 유틸 함수
 
 @shared_task
 def process_transcript(transcript_id):
-    transcript = Transcript.objects.get(id=transcript_id)
-    try:
-        # 1) 이미지 전처리 (흑백·노이즈 제거)  
-        # 2) OCR 수행 (PaddleOCR 등)  
-        # 3) 정규식으로 과목명/학점/학기/이수구분 파싱  
-        parsed = {
-            "courses": [
-                {"name": "컴퓨터구조", "credit": 3, "semester": "2025-1", "type": "전공필수"},
-                {"name": "글쓰기",     "credit": 2, "semester": "2025-1", "type": "교양필수"},
-                # …
-            ]
-        }
-        transcript.parsed_data = parsed
-        transcript.status = 'completed'
-        transcript.save()
-    except Exception as e:
-        transcript.status = 'error'
-        transcript.error_message = str(e)
-        transcript.save()
+    tr = Transcript.objects.get(id=transcript_id)
+    seen = set()
+    results = []
+
+    # 페이지별로 순서대로 OCR + 파싱
+    for page in tr.pages.order_by('page_number'):
+        text = run_ocr(page.file.path)
+        parsed = parse_text(text)  # {'courses': [ {...}, ... ]}
+        for course in parsed.get('courses', []):
+            key = f"{course['name']}_{course['credit']}_{course['semester']}"
+            if key not in seen:
+                seen.add(key)
+                results.append(course)
+
+    tr.parsed_data = {'courses': results}
+    tr.status = 'DONE'
+    tr.save()

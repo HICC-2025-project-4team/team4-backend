@@ -31,3 +31,17 @@ class Transcript(models.Model):
 
     def __str__(self):
         return f"Transcript(user={self.user}, status={self.status})"
+
+
+class TranscriptPage(models.Model):
+    transcript   = models.ForeignKey(
+        Transcript,
+        on_delete=models.CASCADE,
+        related_name='pages'
+    )
+    file         = models.FileField(upload_to='transcripts/pages/')
+    page_number  = models.PositiveIntegerField()
+
+    def __str__(self):
+        return f"Page {self.page_number} of Transcript({self.transcript_id})"
+    
