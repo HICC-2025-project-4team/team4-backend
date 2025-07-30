@@ -7,10 +7,10 @@ from django.conf import settings
 
 class Transcript(models.Model):
     STATUS_CHOICES = [
-        ('PENDING',    '대기'),
-        ('PROCESSING','처리 중'),
-        ('DONE',       '완료'),
-        ('ERROR',      '오류'),
+        ('pending',    '대기'),
+        ('processing','처리 중'),
+        ('done',       '완료'),
+        ('error',      '오류'),
     ]
 
     user = models.ForeignKey(
@@ -22,8 +22,12 @@ class Transcript(models.Model):
     status = models.CharField(
         max_length=10,
         choices=STATUS_CHOICES,
-        default='PENDING'
+        default='pending'
     )
-    parsed = models.JSONField(null=True, blank=True)  # 파싱 결과 저장
+    parsed_data = models.JSONField(null=True, blank=True)  # 파싱 결과 저장
     error_message = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Transcript(user={self.user}, status={self.status})"

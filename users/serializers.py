@@ -78,8 +78,8 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['student_id', 'full_name', 'current_year', 'major', 'password']
-        read_only_fields = ['student_id']
+        fields = ['student_id', 'full_name', 'current_year', 'major', 'password', 'id']
+        read_only_fields = ['student_id', 'id']
 
     def update(self, instance, validated_data):
         # 1) password 처리
