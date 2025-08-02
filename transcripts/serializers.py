@@ -6,7 +6,8 @@ from .models import Transcript, TranscriptPage
 class TranscriptUploadSerializer(serializers.Serializer):
     files = serializers.ListField(
         child=serializers.FileField(),
-        allow_empty=False
+        allow_empty=False,
+        write_only=True
     )
 
     def create(self, validated_data):
@@ -21,6 +22,12 @@ class TranscriptUploadSerializer(serializers.Serializer):
                 page_number=idx
             )
         return transcript
+    
+    class Meta:
+        model = Transcript
+        # 클라이언트에 리턴해줄 필드들
+        fields = ['id', 'files', 'status', 'created_at']
+        read_only_fields = ['id', 'status', 'created_at']
 
 class TranscriptStatusSerializer(serializers.ModelSerializer):
     class Meta:

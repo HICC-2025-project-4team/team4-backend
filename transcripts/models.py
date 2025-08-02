@@ -6,12 +6,11 @@ from django.db import models
 from django.conf import settings
 
 class Transcript(models.Model):
-    STATUS_CHOICES = [
-        ('pending',    '대기'),
-        ('processing','처리 중'),
-        ('done',       '완료'),
-        ('error',      '오류'),
-    ]
+    class STATUS(models.TextChoices) :
+        pending = 'pending', '대기'
+        processing = 'processing','처리 중'
+        done = 'done', '완료'
+        error = 'error', '오류'
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -21,8 +20,8 @@ class Transcript(models.Model):
     file = models.FileField(upload_to='transcripts/')
     status = models.CharField(
         max_length=10,
-        choices=STATUS_CHOICES,
-        default='pending'
+        choices=STATUS.choices,
+        default=STATUS.pending
     )
     parsed_data = models.JSONField(null=True, blank=True)  # 파싱 결과 저장
     error_message = models.TextField(null=True, blank=True)
