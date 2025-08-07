@@ -3,7 +3,7 @@ from rest_framework import serializers
 from .models import Transcript, TranscriptPage
 
 
-class TranscriptUploadSerializer(serializers.Serializer):
+class TranscriptUploadSerializer(serializers.ModelSerializer): 
     files = serializers.ListField(
         child=serializers.FileField(),
         allow_empty=False,
@@ -12,10 +12,14 @@ class TranscriptUploadSerializer(serializers.Serializer):
 
     def create(self, validated_data):
         user = self.context['request'].user
-        # 1) Transcript 레코드 생성
-        transcript = Transcript.objects.create(user=user)
-        # 2) 페이지별 파일 저장
-        for idx, f in enumerate(validated_data['files'], start=1):
+        # validated_data에서 'files'를 분리
+        files = validated_data.pop('files')
+        
+        # Transcript 레코드 생성 (user만으로)
+        transcript = Transcript.objects.create(user=user, **validated_data)
+
+        # 페이지별 파일 저장
+        for idx, f in enumerate(files, start=1):
             TranscriptPage.objects.create(
                 transcript=transcript,
                 file=f,
@@ -25,7 +29,7 @@ class TranscriptUploadSerializer(serializers.Serializer):
     
     class Meta:
         model = Transcript
-        # 클라이언트에 리턴해줄 필드들
+        # 이제 이 필드들이 정상적으로 응답에 포함됩니다.
         fields = ['id', 'files', 'status', 'created_at']
         read_only_fields = ['id', 'status', 'created_at']
 

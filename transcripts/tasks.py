@@ -1,40 +1,42 @@
-# tasks.py
+# transcripts/tasks.py
+
 from celery import shared_task
-from django.conf import settings
-from .utils import parse_transcript_table
-from .models import Transcript    # 실제 모델 이름에 맞춰 변경하세요
+from .utils import parse_transcript_table_with_paddle
+from .models import Transcript
 
 @shared_task
-def process_transcript(transcript_id: int) -> list[str]:
-    """
-    1) DB에서 Transcript 인스턴스를 조회
-    2) status='PROCESSING' 저장
-    3) image Field에서 OCR 수행
-    4) parsed_text, status='DONE' 저장
-    """
+def process_transcript(transcript_id: int):
     try:
         t = Transcript.objects.get(pk=transcript_id)
     except Transcript.DoesNotExist:
-        print(f"[OCR 태스크] Transcript #{transcript_id} 가 존재하지 않습니다.")
-        return []
+        return
 
-    # → 2) 처리 중 표시
+    # 상태 → 처리중
     t.status = Transcript.STATUS.processing
     t.save(update_fields=["status"])
 
-    # → 3) OCR 수행
-    print(f"[OCR 태스크] 시작: Transcript #{transcript_id}, 파일={t.file.name}")
-    all_pages = []
-    for page in t.pages.order_by('page_number'):
-        table = parse_transcript_table(page.file)
-        all_pages.append({
-            "page": page.page_number,
-            "table": table
-        })
+    try:
+        all_cells: list[str] = []
 
-    # → 4) 결과 및 완료 상태 저장
-    t.parsed_data = all_pages
-    t.status = Transcript.STATUS.done
-    t.save(update_fields=["parsed_data", "status", "error_message"])
+        # 1) 페이지별로 표 파싱 → 셀 단위 문자열 수집
+        for page in t.pages.order_by("page_number"):
+            print(f"[OCR 태스크] 페이지 {page.page_number} 처리 시작: {page.file.name}")
+            rows = parse_transcript_table_with_paddle(page.file)
+            for row in rows:
+                # row는 List[str]이므로, 그대로 extend
+                all_cells.extend(row)
 
-    return table
+        # 2) 최종적으로 flat list를 JSONField에 저장
+        t.parsed_data   = all_cells
+        t.status        = Transcript.STATUS.done
+        t.error_message = None
+
+    except Exception as e:
+        print(f"Transcript processing failed for id={transcript_id}: {e}")
+        t.status        = Transcript.STATUS.error
+        t.error_message = str(e)
+
+    finally:
+        t.save(update_fields=["parsed_data", "status", "error_message"])
+
+    return t.status
