@@ -1,23 +1,26 @@
+# transcripts/custom_paddle_ocr_script.py
 import re
 import cv2
 from paddleocr import PaddleOCR, draw_ocr
 
 
 FOOTERS = {"신청학점", "전체성적", "취득학점", "증명평점", "백점만점환산점수"}
+
+
 class MyPaddleOCR:
     def __init__(self, lang: str = "korean", **kwargs):
         self.lang = lang
         self._ocr = PaddleOCR(
             lang=self.lang,
             use_angle_cls=True,
-            table=True,                # 테이블 구조 인식 활성화(지금은 토큰만 사용, 추후 확장용)
+            table=True,                # 테이블 구조 인식(추후 확장용)
             drop_score=0.1,
             det_db_box_thresh=0.3,
             det_db_unclip_ratio=1.6,
             **kwargs
         )
         self.img_path = None
-        self.ocr_result = []
+        self.ocr_result: list = []
 
     def get_ocr_result(self):
         return self.ocr_result
@@ -28,8 +31,8 @@ class MyPaddleOCR:
     def run_ocr(self, img_path: str, debug: bool = False) -> list[str]:
         """이미지에서 토큰(단어) 리스트만 뽑아온다."""
         self.img_path = img_path
-        texts = []
-        result = self._ocr.ocr(img_path, cls=True)   # ← cls=True 권장
+        texts: list[str] = []
+        result = self._ocr.ocr(img_path, cls=True)
 
         # 일반(라인) 결과를 그대로 사용 (table=True여도 라인 결과는 유지됨)
         self.ocr_result = result[0] if isinstance(result, list) else result
@@ -62,106 +65,191 @@ class MyPaddleOCR:
         if out_path:
             cv2.imwrite(out_path, roi_img)
 
+
 # -----------------------------
 # 아래: 토큰 → 표 행 파서
 # -----------------------------
 
 def _normalize_token(t: str) -> str:
-    """OCR 오인식 보정: O↔0, I↔1 등 기본 규칙"""
-    t = t.replace('O', '0').replace('o', '0')
-    t = t.replace('I', '1').replace('l', '1').replace('＊','*')
-    # 학점/성적에서 BO, CO → B0, C0
-    t = re.sub(r'^([ABCDF])O$', r'\g<1>0', t) 
-    return t
+    """보수적 보정: 괄호/기호/성적/학점/코드만 정리, 영문단어는 건드리지 않음."""
+    t = t.strip()
+    # 괄호/특수문자 정리
+    t = (t.replace('［', '[').replace('］', ']')
+           .replace('（', '(').replace('）', ')')
+           .replace('[', '(').replace(']', ')')
+           .replace('＊', '*'))
+
+    # 성적 보정: A/B/C/D/F(+/0 생략 허용)
+    m = re.fullmatch(r'([ABCDF])([+0]?)', t, re.IGNORECASE)
+    if m:
+        base = m.group(1).upper()
+        suf = m.group(2)
+        return base + ('+' if suf == '+' else '0')
+
+    # 학점(1자리)만 보정: N→2, M→3
+    if re.fullmatch(r'[0-9]', t) or t in {'N', 'M'}:
+        return {'N': '2', 'M': '3'}.get(t, t)
+
+    # 과목코드(6자리)
+    if re.fullmatch(r'\d{6}', t):
+        return t
+
+    return t  # 나머지는 그대로
+
+
+def _is_koreanish(tok: str) -> bool:
+    """한글/국문 과목명 토큰 여부(괄호/별표 포함 허용)."""
+    return bool(re.search(r'[가-힣]|[()＊*·&]', tok))
+
+
+def _as_credit(tok: str) -> str | None:
+    return tok if re.fullmatch(r'\d', tok) else None
+
+
+def _as_grade(tok: str) -> str | None:
+    t = tok.upper()
+    if t in {'A+', 'B+', 'C+', 'D+', 'F+', 'A0', 'B0', 'C0', 'D0', 'F0', 'A', 'B', 'C', 'D', 'F'}:
+        return 'A+' if t == 'A+' else (t if len(t) == 2 else t + '0')
+    return None
+
 
 def parse_transcript_tokens(tokens: list[str]) -> list[list[str]]:
     """
     성적표 토큰을 행렬 형태로 변환.
-    [제목행, 헤더행, 데이터행들...] 순서의 2차원 리스트를 반환.
+    반환 형식: [제목행, 헤더행(5열), 데이터행들(5열=학수번호/과목명/학점/성적/재수강)]
     """
     if not tokens:
         return []
 
     tokens = [_normalize_token(t) for t in tokens]
 
-    # 1) 제목: "학수번호"가 나오기 전까지 (보통 3개: 2025학년도 3학년 1학기)
+    # 1) 제목: "학수번호" 전까지
     try:
         head_idx = tokens.index("학수번호")
     except ValueError:
         head_idx = 0  # 못 찾으면 그냥 0
 
     title = tokens[:head_idx] if head_idx > 0 else []
-    # 2) 헤더(열 제목): "학수번호"부터 6개 (학수번호/과목명/영문과목명/학점/성적/재수강)
-    headers = tokens[head_idx:head_idx+6] if head_idx+6 <= len(tokens) else []
 
-    rows = []
-    i = head_idx + len(headers)
-    # 3) 데이터 파싱: "6자리 숫자"를 학수번호로 보고 한 행을 생성
+    # 2) 헤더 고정(영문과목명 제거)
+    headers = ["학수번호", "과목명", "학점", "성적", "재수강"]
+
+    # 3) 데이터 시작 위치: 헤더 이후 첫 과목코드(6자리)까지 스킵
+    i = head_idx
+    while i < len(tokens) and not re.fullmatch(r'\d{6}', tokens[i]):
+        i += 1
+
+    rows: list[list[str]] = []
     while i < len(tokens):
-        # 푸터(전체성적/신청학점 등) 만난 경우 종료
-        if tokens[i] in ("신청학점", "전체성적", "취득학점", "증명평점", "백점만점환산점수"):
+        # 푸터 만나면 종료
+        if tokens[i] in FOOTERS:
             break
 
+        # 과목코드
         if not re.fullmatch(r'\d{6}', tokens[i] or ""):
             i += 1
             continue
+        code = tokens[i]
+        i += 1
 
-        code = tokens[i]; i += 1
-        if i >= len(tokens): break
-        kor = tokens[i]; i += 1
-
-        # 영문과목명: '학점'(정수) 나오기 전까지 붙이기
-        eng_tokens = []
-        while i < len(tokens) and not re.fullmatch(r'\d+', tokens[i] or ""):
-            # 푸터 만나면 중단
-            if tokens[i] in ("신청학점", "전체성적", "취득학점", "증명평점", "백점만점환산점수"):
-                break
-            eng_tokens.append(tokens[i])
+        # 국문 과목명: 연속된 한국어 토큰을 모두 합쳐서 캡쳐
+        kor_parts: list[str] = []
+        while i < len(tokens) and _is_koreanish(tokens[i]) and not re.fullmatch(r'\d{6}', tokens[i]):
+            kor_parts.append(tokens[i])
             i += 1
-        eng = " ".join(eng_tokens).replace("  ", " ").strip()
+        if not kor_parts:  # 최소 1토큰은 있어야 함
+            # 국문명이 누락된 경우 안전장치
+            kor_parts = [""]
 
-        if i >= len(tokens): break
-        credit = tokens[i]; i += 1
+        kor = " ".join(kor_parts).strip()
 
-        if i >= len(tokens): break
-        grade = tokens[i]; i += 1
+        # 재수강 표식은 영문/학점/성적 앞뒤로 섞여 있을 수 있어 미리/사후 모두 체크
+        re_flag = ""
 
-        rows.append([code, kor, eng, credit, grade])
+        # (A) 영문 과목명은 건너뛰기: 학점/성적/다음 코드/푸터가 나올 때까지 스킵
+        while i < len(tokens):
+            if tokens[i] in FOOTERS:
+                break
+            if re.fullmatch(r'\d{6}', tokens[i]):  # 다음 과목 시작
+                break
+            # 재수강 N/Y 가 먼저 나오는 케이스 (예: "LAB DESIGN N A0")
+            if tokens[i] in {"N", "Y"}:
+                re_flag = tokens[i]
+                i += 1
+                continue
+            # 학점/성적 등장 시 종료
+            if _as_credit(tokens[i]) or _as_grade(tokens[i]):
+                break
+            i += 1  # 영문 토큰 스킵
 
-    result = []
-    if title:   result.append(title)
-    if headers: result.append(headers)
+        # (B) 학점/성적 캡쳐(순서 유연)
+        credit, grade = "", ""
+        if i < len(tokens) and _as_credit(tokens[i]):
+            credit = _as_credit(tokens[i]) or ""
+            i += 1
+        if i < len(tokens) and _as_grade(tokens[i]):
+            grade = _as_grade(tokens[i]) or ""
+            i += 1
+        # 반대 순서 보완
+        if not credit and i < len(tokens) and _as_credit(tokens[i]):
+            credit = _as_credit(tokens[i]) or ""
+            i += 1
+        if not grade and i < len(tokens) and _as_grade(tokens[i]):
+            grade = _as_grade(tokens[i]) or ""
+            i += 1
+
+        # (C) 재수강 표식이 뒤에 오는 경우
+        if not re_flag and i < len(tokens) and tokens[i] in {"N", "Y"}:
+            re_flag = tokens[i]
+            i += 1
+
+        rows.append([code, kor, credit, grade, re_flag])
+
+        # 다음 과목코드가 나올 때까지 쓸모없는 토큰 스킵
+        while i < len(tokens) and not re.fullmatch(r'\d{6}', tokens[i]) and tokens[i] not in FOOTERS:
+            i += 1
+
+    result: list[list[str]] = []
+    if title:
+        result.append(title)
+    result.append(headers)
     result.extend(rows)
     return result
 
+
 # -----------------------------
-# 사용 예시 함수 (원래 ocr_to_cells 대체)
+# 사용 예시 함수
 # -----------------------------
 
 ocr = MyPaddleOCR()
 
 def ocr_to_rows(image_path: str, cols: int = 6) -> list[list[str]]:
     tokens = ocr.run_ocr(image_path, debug=False)
-    table  = parse_transcript_tokens(tokens)
+    table = parse_transcript_tokens(tokens)
     return table
 
 
-def rows_to_text(rows: list[list[str]]) -> str:
+def rows_to_text(rows: list[list[str]], include_english: bool = True) -> str:
     """
-    [제목행, 헤더행, 데이터행...] 형태의 rows를
-    탭(\t)으로 구분한 멀티라인 문자열로 변환.
+    [제목행, 헤더행, 데이터행...]을 탭(\t) 구분 멀티라인 문자열로 변환.
+    - 헤더/데이터 칼럼 수에 자동 적응(5열이면 그대로 출력).
+    - include_english는 하위호환용(현재 파서는 영문 칼럼을 생성하지 않음).
     """
     if not rows:
         return ""
 
-    lines = []
-    # 제목행(옵션), 헤더행(옵션)
-    if len(rows) >= 1: lines.append("\t".join(rows[0]))
-    if len(rows) >= 2: lines.append("\t".join(rows[1]))
+    lines: list[str] = []
 
-    # 데이터행: [code, kor, eng, credit, grade] 5개로 패딩
+    # 제목(있을 때만)
+    if len(rows) >= 1 and rows[0] and "학수번호" not in rows[0]:
+        lines.append("\t".join(rows[0]))
+
+    # 헤더
+    if len(rows) >= 2:
+        lines.append("\t".join(rows[1]))
+
+    # 데이터
     for r in rows[2:]:
-        r5 = (r + ["", ""])[:5]
-        lines.append("\t".join(r5))
+        lines.append("\t".join(r))
 
     return "\n".join(lines)
