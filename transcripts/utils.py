@@ -1,4 +1,4 @@
-from .custom_paddle_ocr_script import ocr_to_cells
+from .custom_paddle_ocr_script import ocr_to_rows
 
 
 def parse_transcript_table_with_paddle(image_input, cols: int = 6) -> list[list[str]]:
@@ -9,4 +9,4 @@ def parse_transcript_table_with_paddle(image_input, cols: int = 6) -> list[list[
         path = image_input
     else:
         path = image_input.path
-    return ocr_to_cells(path, cols=cols)
+    return ocr_to_rows(path, cols=cols)
