@@ -3,8 +3,9 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework import status, permissions
 from django.shortcuts import get_object_or_404
-from .custom_paddle_ocr_script import rows_to_text, parse_transcript_tokens
 from django.http import HttpResponse
+from .custom_paddle_ocr_script import rows_to_text
+
 
 from .models import Transcript
 from .serializers import (
@@ -14,6 +15,9 @@ from .serializers import (
 )
 from .tasks import process_transcript
 
+
+def _rows_to_tsv(rows: list[list[str]]) -> str:
+    return "\n".join("\t".join(map(str, r)) for r in rows)
 class TranscriptUploadView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
@@ -106,23 +110,16 @@ class TranscriptParsedView(APIView):
                 # 파싱된 JSON 데이터를 그대로 반환  ← 이 부분을 전부 교체
         data = transcript.parsed_data
 
-        # 권장 케이스: 2차원 rows로 저장된 경우
+        # 새 파이프라인: 2차원 rows로 저장된 경우 → 학기별 블록 텍스트로 반환
         if isinstance(data, list) and data and isinstance(data[0], list):
-            tsv = rows_to_text(data)
-            return HttpResponse(tsv, content_type="text/plain; charset=utf-8")
+            return HttpResponse(rows_to_text(data, group_by_term=True),
+                                content_type="text/plain; charset=utf-8")
 
-        # 예전 flat 토큰 리스트가 남아있는 경우 폴백
-        if isinstance(data, list) and (not data or isinstance(data[0], str)):
-            rows = parse_transcript_tokens(data)   # 토큰 → rows 복원
-            tsv = rows_to_text(rows)
-            return HttpResponse(tsv, content_type="text/plain; charset=utf-8")
 
-        # 이미 문자열로 저장돼 있다면 그대로
+        # 이미 문자열이면 그대로 반환
         if isinstance(data, str):
             return HttpResponse(data, content_type="text/plain; charset=utf-8")
 
-        # 그 외 형식 오류
-        return Response(
-            {"error": "파싱 결과 형식이 올바르지 않습니다."},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+        # 그 외(예: 과거 포맷 등)는 JSON 그대로 반환
+        return Response(data, status=status.HTTP_200_OK)
+        # ----- 교체 끝 -----

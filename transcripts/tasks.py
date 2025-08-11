@@ -1,7 +1,7 @@
 # transcripts/tasks.py
 
 from celery import shared_task
-from .utils import parse_transcript_table_with_paddle
+from .utils import parse_single_table_with_paddle
 from .models import Transcript
 
 @shared_task
@@ -21,7 +21,7 @@ def process_transcript(transcript_id: int):
         # 1) 페이지별로 표 파싱 → 셀 단위 문자열 수집
         for page in t.pages.order_by("page_number"):
             print(f"[OCR 태스크] 페이지 {page.page_number} 처리 시작: {page.file.name}")
-            rows = parse_transcript_table_with_paddle(page.file)
+            rows = parse_single_table_with_paddle(page.file)
             all_rows.extend(rows)
 
         # 2) 최종적으로 flat list를 JSONField에 저장
