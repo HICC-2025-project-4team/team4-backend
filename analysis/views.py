@@ -6,16 +6,15 @@ from .models import GraduationRequirement
 from .serializers import GraduationStatusSerializer
 
 # ---------------------------
-# 유틸/공통 (코드 전용 비교)
+# 유틸/공통 (code 기반)
 # ---------------------------
 import re
 import unicodedata
 from typing import Any, Dict, List
 
-ROMAN = {"Ⅰ":"1","Ⅱ":"2","Ⅲ":"3","Ⅳ":"4","Ⅴ":"5","Ⅵ":"6","Ⅶ":"7","Ⅷ":"8","Ⅸ":"9"}
+ROMAN = {"Ⅰ": "1", "Ⅱ": "2", "Ⅲ": "3", "Ⅳ": "4", "Ⅴ": "5", "Ⅵ": "6", "Ⅶ": "7", "Ⅷ": "8", "Ⅸ": "9"}
 
 def _norm(s: str | None) -> str:
-    """(이름 비교가 필요할 때만 사용; 현재 키 비교는 code 전용)"""
     if not s:
         return ""
     s = unicodedata.normalize("NFKC", str(s)).strip().lower()
@@ -30,12 +29,8 @@ def norm_code(x) -> str:
     s = re.sub(r"\D", "", str(x or ""))
     return s.zfill(6) if s else ""
 
-def course_key_from_dict(d: Dict[str, Any]) -> str:
-    """비교 키: code만 사용 (이름 fallback 제거)"""
-    return norm_code(d.get("code"))
-
 def get_courses_from_parsed_data(parsed) -> List[Dict[str, Any]]:
-    """parsed(_data) 안전 추출"""
+    """parsed_data 안전 추출"""
     if not parsed:
         return []
     if isinstance(parsed, dict):
@@ -44,17 +39,96 @@ def get_courses_from_parsed_data(parsed) -> List[Dict[str, Any]]:
         return parsed
     return []
 
-def get_valid_courses(transcript):
-    payload = transcript.parsed_data
-    all_courses = payload.get("courses", []) if isinstance(payload, dict) else (payload or [])
+def get_valid_courses(transcript) -> List[Dict[str, Any]]:
+    """F 및 재수강 제외 (최근 통과 기록만) — parsed_data만 사용"""
+    all_courses = get_courses_from_parsed_data(getattr(transcript, "parsed_data", None))
     return [
         c for c in all_courses
-        if c and str(c.get("grade","")).upper() != "F" and not c.get("retake", False)
+        if c and (str(c.get("grade", "")).upper() != "F") and (not c.get("retake", False))
     ]
 
+def _add_code_credit_from_list(store: dict, items: list[dict] | None):
+    if not items:
+        return
+    for it in items:
+        code = norm_code(it.get("code"))
+        credit = int(it.get("credit") or 0)
+        if code and credit and code not in store:
+            store[code] = credit
+
+def build_code_credit_map(req: GraduationRequirement) -> dict[str, int]:
+    """
+    졸업요건 내 모든 과목을 훑어 code -> credit 매핑 생성.
+    (파싱 데이터에 credit이 없어도 합산 가능)
+    """
+    m: dict[str, int] = {}
+    _add_code_credit_from_list(m, req.major_must_courses)
+    _add_code_credit_from_list(m, req.major_selective_courses)
+    _add_code_credit_from_list(m, req.general_must_courses)
+    _add_code_credit_from_list(m, req.general_selective_courses)
+    _add_code_credit_from_list(m, req.special_general_courses)
+    _add_code_credit_from_list(m, req.sw_courses)
+    _add_code_credit_from_list(m, req.msc_courses)
+    dr = req.drbol_courses or {}
+    if isinstance(dr, dict):
+        for _area, lst in dr.items():
+            _add_code_credit_from_list(m, lst)
+    return m
+
+def codes_set(items: list[dict] | None) -> set[str]:
+    return {norm_code(i.get("code")) for i in (items or []) if i.get("code")}
+
+def build_code_sets(req: GraduationRequirement):
+    """요건에서 분류별 코드셋/맵 생성"""
+    major_must = codes_set(req.major_must_courses)
+    major_sel  = codes_set(req.major_selective_courses)
+    gen_must   = codes_set(req.general_must_courses)
+    gen_sel    = codes_set(req.general_selective_courses)
+    spec_gen   = codes_set(req.special_general_courses)
+    sw_codes   = codes_set(req.sw_courses)
+    msc_codes  = codes_set(req.msc_courses)
+
+    # 드볼: 영역별 코드셋 + 전체 코드셋
+    area_code_map: dict[str, set[str]] = {}
+    dr_all = set()
+    dr = req.drbol_courses or {}
+    if isinstance(dr, dict):
+        for area, lst in dr.items():
+            s = codes_set(lst)
+            area_code_map[area] = s
+            dr_all |= s
+
+    return {
+        "major_must": major_must,
+        "major_sel": major_sel,
+        "gen_must": gen_must,
+        "gen_sel": gen_sel,
+        "spec_gen": spec_gen,
+        "sw": sw_codes,
+        "msc": msc_codes,
+        "dr_area": area_code_map,
+        "dr_all": dr_all,
+    }
+
+def credit_from_map_or_course(course: dict, code_credit_map: dict[str, int]) -> int:
+    """과목 dict에 credit이 없으면 학수번호 매핑으로 보정"""
+    v = course.get("credit")
+    if v not in (None, "", 0):
+        try:
+            return int(v)
+        except Exception:
+            pass
+    return code_credit_map.get(norm_code(course.get("code")), 0)
+
+def sum_for_codes(courses: list[dict], target_codes: set[str], code_credit_map: dict[str, int]) -> int:
+    return sum(
+        credit_from_map_or_course(c, code_credit_map)
+        for c in courses
+        if norm_code(c.get("code")) in target_codes
+    )
 
 def distribute(total: int, n: int) -> List[int]:
-    """총합을 n개로 고르게 분배"""
+    """총합을 n개로 고르게 분배 (옵션)"""
     if n <= 0:
         return []
     base = total // n
@@ -66,7 +140,7 @@ def distribute(total: int, n: int) -> List[int]:
 
 
 # ---------------------------
-# 핵심 분석 함수
+# 핵심 분석 함수 (전부 code 기반)
 # ---------------------------
 def analyze_graduation(user_id: int):
     # 1) 유저
@@ -74,35 +148,40 @@ def analyze_graduation(user_id: int):
     if not user:
         return {"error": "사용자를 찾을 수 없습니다.", "status": 404}
 
-    # 2) 성적표
+    # 2) 성적표 (parsed_data만 사용)
     transcript = Transcript.objects.filter(user_id=user_id).order_by("-created_at").first()
     if not transcript or not transcript.parsed_data:
         return {"error": "성적표 데이터가 없습니다.", "status": 404}
 
-
     courses = get_valid_courses(transcript)
 
-    # 3) 졸업요건 (입학년도 미사용: 전공으로만 매칭)
+    # 3) 졸업요건 (전공으로 매칭)
     requirement = GraduationRequirement.objects.filter(major=user.major).first()
     if not requirement:
         return {"error": "졸업 요건 데이터가 없습니다.", "status": 500}
 
-    # 학점 합산
-    total_credit = sum(int(c.get("credit", 0) or 0) for c in courses)
-    major_credit = sum(int(c.get("credit", 0) or 0) for c in courses if "전공" in (c.get("type") or ""))
-    general_credit = sum(int(c.get("credit", 0) or 0) for c in courses if "교양" in (c.get("type") or ""))
-    drbol_credit = sum(int(c.get("credit", 0) or 0) for c in courses if "드볼" in (c.get("type") or ""))
-    sw_credit = sum(int(c.get("credit", 0) or 0) for c in courses if ("sw" in (c.get("type") or "").lower() or "데이터활용" in (c.get("type") or "")))
-    msc_credit = sum(int(c.get("credit", 0) or 0) for c in courses if "msc" in (c.get("type") or "").lower())
-    special_general_credit = sum(int(c.get("credit", 0) or 0) for c in courses if "특성화교양" in (c.get("major_field") or ""))
+    # 4) 매핑/코드셋 준비
+    code_credit_map = build_code_credit_map(requirement)
+    S = build_code_sets(requirement)
+    taken_codes = {norm_code(c.get("code")) for c in courses if c.get("code")}
 
-    # 전공필수 미이수 (학기별 dict)
+    # 5) 학점 합산 — code 기반
+    total_credit = sum(credit_from_map_or_course(c, code_credit_map) for c in courses)
+
+    major_credit   = sum_for_codes(courses, S["major_must"] | S["major_sel"], code_credit_map)
+    # 교양 총합 = 교양필수 + 교양선택 + 특성화교양 + 드볼
+    general_credit = sum_for_codes(courses, S["gen_must"] | S["gen_sel"] | S["spec_gen"] | S["dr_all"], code_credit_map)
+    drbol_credit   = sum_for_codes(courses, S["dr_all"], code_credit_map)
+    sw_credit      = sum_for_codes(courses, S["sw"], code_credit_map)
+    msc_credit     = sum_for_codes(courses, S["msc"], code_credit_map)
+    special_general_credit = sum_for_codes(courses, S["spec_gen"], code_credit_map)
+
+    # 6) 전공필수 미이수 (학기별 dict) — code 기준
     must_list: list[dict] = requirement.major_must_courses or []
-    completed_keys = {course_key_from_dict(c) for c in courses if c}
     missing_by_semester: dict[str, list[dict]] = {}
     for item in must_list:
-        key = course_key_from_dict(item)
-        if key in completed_keys:
+        code = norm_code(item.get("code"))
+        if not code or code in taken_codes:
             continue
         sem = item.get("semester") or "기타"
         missing_by_semester.setdefault(sem, []).append({
@@ -110,64 +189,33 @@ def analyze_graduation(user_id: int):
             "name": item.get("name", "") or ""
         })
 
-    # ---------- 드볼: 7개 영역 중 서로 다른 6개 영역 + 총 18학점(예외: 17학점 + 2학점 영역 1개) ----------
-    drbol_areas = [a.strip() for a in (requirement.drbol_areas or "").split(",") if a.strip()]
-    required_areas_count = min(6, len(drbol_areas))  # 규칙: 7개 중 6개
+    # 7) 드볼 커버리지/학점 — code 기준 (7개 중 6개 커버 + 18학점; 17학점 예외)
+    drbol_areas = list(S["dr_area"].keys())
+    required_areas_count = min(6, len(drbol_areas))
 
-    # 영역별 수강 과목 수/학점
     area_course_count = {a: 0 for a in drbol_areas}
-    area_credits = {a: 0 for a in drbol_areas}
-    total_dvbol_credit = 0
+    area_credits      = {a: 0 for a in drbol_areas}
 
     for c in courses:
-        mf = (c.get("major_field") or "").strip()
-        if mf in area_course_count:
-            credit_val = int(c.get("credit") or 0)
-            area_course_count[mf] += 1
-            area_credits[mf] += credit_val
-            total_dvbol_credit += credit_val
+        code = norm_code(c.get("code"))
+        cred = credit_from_map_or_course(c, code_credit_map)
+        for area in drbol_areas:
+            if code in S["dr_area"][area]:
+                area_course_count[area] += 1
+                area_credits[area] += cred
 
-    # 커버한/미커버 영역
-    covered_areas = [a for a, cnt in area_course_count.items() if cnt >= 1]
+    covered_areas = [a for a in drbol_areas if area_course_count[a] >= 1]
     covered_count = len(covered_areas)
-    missing_drbol_areas = [a for a in drbol_areas if area_course_count.get(a, 0) == 0]
+    missing_drbol_areas = [a for a in drbol_areas if area_course_count[a] == 0]
 
-    # 17학점 예외: "총 17학점" 이고 "커버 영역 중 적어도 한 영역의 합계가 2학점"이면 OK
-    has_two_credit_area = any(area_credits.get(a, 0) == 2 for a in covered_areas)
-
+    total_dvbol_credit = sum(area_credits.values())
+    has_two_credit_area = any(area_credits[a] == 2 for a in covered_areas)
     coverage_ok = covered_count >= required_areas_count
-    credit_ok = (total_dvbol_credit >= 18) or (total_dvbol_credit == 17 and has_two_credit_area)
+    credit_ok   = (total_dvbol_credit >= requirement.drbol_required) or (
+        total_dvbol_credit == 17 and has_two_credit_area
+    )
 
-    # 응답용 보조 값들
-    areas_remaining = max(required_areas_count - covered_count, 0)
-    credit_remaining = max(0, 18 - total_dvbol_credit) if not (total_dvbol_credit == 17 and has_two_credit_area) else 0
-
-    # 영역별 상세(프런트 시각화용)
-    areas_detail = [
-        {
-            "area": a,
-            "covered": area_course_count[a] >= 1,
-            "courses_count": area_course_count[a],
-            "completed_credit": area_credits[a],
-        }
-        for a in drbol_areas
-    ]
-
-    dvbol_result = {
-        "areas": areas_detail,
-        "areas_required": required_areas_count,
-        "areas_covered": covered_count,
-        "areas_remaining": areas_remaining,
-        "missing_areas": missing_drbol_areas,
-        "total_credit_completed": total_dvbol_credit,
-        "total_credit_required": 18,
-        "credit_remaining": credit_remaining,
-        "coverage_ok": coverage_ok,
-        "credit_ok": credit_ok,
-        "status": coverage_ok and credit_ok,  # 최종 판정
-    }
-
-    # ---------- 상태 판정 ----------
+    # 8) 상태 판정
     status_flag = "complete"
     messages = []
     if total_credit < requirement.total_required:
@@ -177,7 +225,7 @@ def analyze_graduation(user_id: int):
     if general_credit < requirement.general_required:
         status_flag = "pending"; messages.append(f"교양필수 {requirement.general_required - general_credit}학점 부족")
 
-    # ✅ 드볼: 총 학점(≥ 요구치) + 커버리지(서로 다른 영역 6개)
+    # 드볼: 총 학점 + 커버리지 동시 충족 필요
     if (total_dvbol_credit < requirement.drbol_required) or (covered_count < required_areas_count):
         status_flag = "pending"
         msg_parts = []
@@ -208,7 +256,7 @@ def analyze_graduation(user_id: int):
         "general_completed": general_credit,
         "general_required": requirement.general_required,
 
-        "drbol_completed": total_dvbol_credit,  # 영역 합으로 일관 표기
+        "drbol_completed": total_dvbol_credit,
         "drbol_required": requirement.drbol_required,
 
         "sw_completed": sw_credit,
@@ -220,7 +268,6 @@ def analyze_graduation(user_id: int):
         "special_general_completed": special_general_credit,
         "special_general_required": requirement.special_general_required,
 
-        # ✅ Serializer가 기대하는 형태 유지
         "missing_major_courses": missing_by_semester,
         "missing_drbol_areas": missing_drbol_areas,
 
@@ -231,7 +278,7 @@ def analyze_graduation(user_id: int):
 
 
 # ---------------------------
-# View 클래스들 (1~7)
+# 1) 교양 필수 이수 여부 (실제 수강한 것만 리턴, 그룹 OR)
 # ---------------------------
 class GeneralCoursesView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -247,14 +294,14 @@ class GeneralCoursesView(generics.RetrieveAPIView):
             return Response({"error": "졸업 요건 데이터가 없습니다."}, status=500)
 
         transcript = Transcript.objects.filter(user_id=user_id).order_by("-created_at").first()
+        if not transcript or not transcript.parsed_data:
+            return Response({"error": "성적표 데이터가 없습니다."}, status=404)
+
         courses = get_valid_courses(transcript)
+        taken_codes = {norm_code(c.get("code")) for c in courses if c.get("code")}
 
-        # 내가 실제 수강한 코드 집합 (정규화)
-        taken_codes = { norm_code(c.get("code")) for c in courses if c.get("code") }
-
-        # 1) 이름-코드 매핑, 2) 이름(그룹키)별 코드 묶기
+        # '전공기초영어(1)/(2)' 같은 대체 코드는 그룹 OR (괄호 숫자 제거)
         def group_key(name: str) -> str:
-            # '전공기초영어(1)' -> '전공기초영어' 로 묶기 (괄호 숫자 제거)
             if not name:
                 return ""
             m = re.match(r"^(.*?)(?:\(\s*\d+\s*\))$", name.strip())
@@ -270,31 +317,28 @@ class GeneralCoursesView(generics.RetrieveAPIView):
             name_by_code[code] = name
             groups.setdefault(group_key(name), set()).add(code)
 
-        # 각 그룹에서 실제로 '수강한 코드'만 수집
+        # 각 그룹에서 '실제로 들은 코드'만 수집
         completed_items = []
         missing_groups = []
         for base, codes in groups.items():
             hit = codes & taken_codes
             if hit:
-                # 실제 들은 코드만 응답 리스트에 포함
                 for code in sorted(hit):
-                    completed_items.append({
-                        "code": code,
-                        "name": name_by_code.get(code, base)
-                    })
+                    completed_items.append({"code": code, "name": name_by_code.get(code, base)})
             else:
                 missing_groups.append(base)
 
         is_completed_all = (len(missing_groups) == 0) if groups else False
 
         return Response({
-            "필수교양": completed_items,   # ✅ 실제로 들은 필수 교양만 노출
+            "필수교양": completed_items,   # 실제 들은 필수교양만 노출
             "이수여부": is_completed_all
-            # 디버깅용으로 보고 싶으면 "부족그룹": missing_groups 를 잠깐 추가해도 좋아요.
         }, status=status.HTTP_200_OK)
 
 
-
+# ---------------------------
+# 2) 전공 필수/선택 이수 여부 (code 교집합)
+# ---------------------------
 class MajorCoursesView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -309,15 +353,18 @@ class MajorCoursesView(generics.RetrieveAPIView):
             return Response({"error": "졸업 요건 데이터가 없습니다."}, status=500)
 
         transcript = Transcript.objects.filter(user_id=user_id).order_by("-created_at").first()
+        if not transcript or not transcript.parsed_data:
+            return Response({"error": "성적표 데이터가 없습니다."}, status=404)
+
         courses = get_valid_courses(transcript)
-        taken_codes = { norm_code(c.get("code")) for c in courses if (c.get("code") or "").strip() }
+        taken_codes = {norm_code(c.get("code")) for c in courses if c.get("code")}
 
         def completed_from(require_list):
             rows = []
             for it in (require_list or []):
                 code = norm_code(it.get("code"))
                 if code and code in taken_codes:
-                    rows.append({"code": code, "name": it.get("name","")})
+                    rows.append({"code": code, "name": it.get("name", "")})
             return rows
 
         return Response({
@@ -326,6 +373,9 @@ class MajorCoursesView(generics.RetrieveAPIView):
         }, status=status.HTTP_200_OK)
 
 
+# ---------------------------
+# 3) 총 이수 학점
+# ---------------------------
 class TotalCreditView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -336,42 +386,22 @@ class TotalCreditView(generics.RetrieveAPIView):
         return Response({"total_credit": result["data"]["total_completed"]})
 
 
+# ---------------------------
+# 4) 교양 학점 (분석값 그대로 사용)
+# ---------------------------
 class GeneralCreditView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, user_id):
-        user = User.objects.filter(id=user_id).first()
-        if not user:
-            return Response({"error": "사용자를 찾을 수 없습니다."}, status=404)
-
-        transcript = Transcript.objects.filter(user_id=user_id).order_by("-created_at").first()
-        if not transcript or not (getattr(transcript, "parsed_data", None) or getattr(transcript, "parsed", None)):
-            return Response({"general_credit": 0}, status=200)
-
-        # 졸업요건에서 드볼 영역명 리스트 가져오기
-        req = GraduationRequirement.objects.filter(major=user.major).first()
-        drbol_areas = []
-        if req and req.drbol_areas:
-            drbol_areas = [a.strip() for a in req.drbol_areas.split(",") if a.strip()]
-
-        # ✅ 일관성: 재수강/F 제외 후 합산
-        courses = get_valid_courses(transcript)
-        general_credit = 0
-
-        for c in courses:
-            ctype  = (c.get("type") or "").strip()                # 예: 교양 / 드볼 / 특성화교양 / 전공
-            mfield = (c.get("major_field") or "").strip()         # 예: 교양필수 / 교양선택 / 드볼 영역명 등
-            credit = int(c.get("credit") or 0)
-
-            is_general_type  = ctype in {"교양", "드볼", "특성화교양"}
-            is_general_field = mfield in {"교양필수", "교양선택", "특성화교양"} or mfield in drbol_areas
-
-            if credit > 0 and (is_general_type or is_general_field):
-                general_credit += credit
-
-        return Response({"general_credit": general_credit}, status=200)
+        result = analyze_graduation(user_id)
+        if "error" in result:
+            return Response({"error": result["error"]}, status=result["status"])
+        return Response({"general_credit": result["data"]["general_completed"]}, status=200)
 
 
+# ---------------------------
+# 5) 전공 학점 (분석값 그대로 사용)
+# ---------------------------
 class MajorCreditView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -382,6 +412,9 @@ class MajorCreditView(generics.RetrieveAPIView):
         return Response({"major_credit": result["data"]["major_completed"]})
 
 
+# ---------------------------
+# 6) 이수율 (전공/교양)
+# ---------------------------
 class StatisticsCreditView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -395,6 +428,9 @@ class StatisticsCreditView(generics.RetrieveAPIView):
         return Response({"general_rate": general_rate, "major_rate": major_rate})
 
 
+# ---------------------------
+# 7) 졸업 요건 종합 상태
+# ---------------------------
 class StatusCreditView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = GraduationStatusSerializer
@@ -407,7 +443,8 @@ class StatusCreditView(generics.RetrieveAPIView):
 
 
 # ---------------------------
-# ✅ 8) 전체 필수 미이수 (major/general)
+# 8) 전체 학기 필수 미이수 (major/general)
+#    - general: 같은 이름(그룹) 중 하나라도 이수했으면 그 그룹은 제외
 # ---------------------------
 class RequiredMissingView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -417,34 +454,54 @@ class RequiredMissingView(generics.RetrieveAPIView):
         if not user:
             return Response({"error": "사용자를 찾을 수 없습니다."}, status=404)
         transcript = Transcript.objects.filter(user_id=user_id).order_by("-created_at").first()
-        if not transcript or not (getattr(transcript, "parsed_data", None) or getattr(transcript, "parsed", None)):
+        if not transcript or not transcript.parsed_data:
             return Response({"error": "성적표 데이터가 없습니다."}, status=404)
         requirement = GraduationRequirement.objects.filter(major=user.major).first()
         if not requirement:
             return Response({"error": "졸업 요건 데이터가 없습니다."}, status=500)
 
         courses = get_valid_courses(transcript)
-        completed_by_code = { norm_code(c.get("code")) for c in courses if (c.get("code") or "").strip() }
-        completed_by_name = { _norm(c.get("name")) for c in courses if c.get("name") }
+        taken_codes = {norm_code(c.get("code")) for c in courses if c.get("code")}
 
-        def is_completed(item: dict) -> bool:
-            code = norm_code(item.get("code"))
-            if code:
-                return code in completed_by_code
-            return _norm(item.get("name")) in completed_by_name
+        # 전공필수: 개별 code 기준
+        major_missing = []
+        for i in (requirement.major_must_courses or []):
+            code = norm_code(i.get("code"))
+            if code and code not in taken_codes:
+                major_missing.append({
+                    "code": i.get("code", "") or "",
+                    "name": i.get("name", "") or "",
+                    "semester": (i.get("semester") or "기타")
+                })
 
-        major_missing = [
-            {"code": i.get("code","") or "", "name": i.get("name","") or "", "semester": (i.get("semester") or "기타")}
-            for i in (requirement.major_must_courses or [])
-            if not is_completed(i)
-        ]
+        # 교양필수: 같은 이름 그룹 OR — 그룹 중 하나라도 들었으면 그 그룹 전체 제외
+        def group_key(name: str) -> str:
+            if not name:
+                return ""
+            m = re.match(r"^(.*?)(?:\(\s*\d+\s*\))$", name.strip())
+            return (m.group(1) if m else name.strip())
 
-        # 교양필수: 같은 이름의 여러 코드가 있을 수 있으므로 여기선 코드 단위로만 미이수 표기
-        general_missing = [
-            {"code": i.get("code","") or "", "name": i.get("name","") or ""}
-            for i in (requirement.general_must_courses or [])
-            if not is_completed(i)
-        ]
+        groups: dict[str, list[dict]] = {}
+        for i in (requirement.general_must_courses or []):
+            name = group_key(i.get("name", ""))
+            code = norm_code(i.get("code"))
+            if not name or not code:
+                continue
+            groups.setdefault(name, []).append(i)
+
+        general_missing = []
+        for base, lst in groups.items():
+            codes = {norm_code(x.get("code")) for x in lst}
+            if codes & taken_codes:
+                # 그룹 중 하나라도 들었으면 이 그룹은 미이수에서 제외
+                continue
+            # 아무 것도 안 들었다면 그룹의 모든 항목(또는 대표 1개)을 미이수로 표기
+            # 여기서는 '모두' 표기 (필요시 lst[:1]로 대표만 표기 가능)
+            for it in lst:
+                general_missing.append({
+                    "code": it.get("code", "") or "",
+                    "name": it.get("name", "") or ""
+                })
 
         return Response({
             "major_required_missing": major_missing,
@@ -453,7 +510,7 @@ class RequiredMissingView(generics.RetrieveAPIView):
 
 
 # ---------------------------
-# ✅ 9) 미이수 드볼 영역
+# 9) 미이수 드볼 영역 (커버리지+학점)
 # ---------------------------
 class DrbolMissingView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -463,32 +520,34 @@ class DrbolMissingView(generics.RetrieveAPIView):
         if not user:
             return Response({"error": "사용자를 찾을 수 없습니다."}, status=404)
         transcript = Transcript.objects.filter(user_id=user_id).order_by("-created_at").first()
-        if not transcript or not (getattr(transcript, "parsed_data", None) or getattr(transcript, "parsed", None)):
+        if not transcript or not transcript.parsed_data:
             return Response({"error": "성적표 데이터가 없습니다."}, status=404)
         requirement = GraduationRequirement.objects.filter(major=user.major).first()
         if not requirement:
             return Response({"error": "졸업 요건 데이터가 없습니다."}, status=500)
 
-        # 기준들
-        areas = [a.strip() for a in (requirement.drbol_areas or "").split(",") if a.strip()]
-        required_areas_count = min(6, len(areas))          # 규칙: 7개 중 6개 영역 커버
-        required_credit_total = requirement.drbol_required # 보통 18
+        # 코드셋/매핑
+        code_credit_map = build_code_credit_map(requirement)
+        S = build_code_sets(requirement)
 
-        # 수강 현황 집계
+        areas = list(S["dr_area"].keys())
+        required_areas_count = min(6, len(areas))
         courses = get_valid_courses(transcript)
+
         area_course_count = {a: 0 for a in areas}
         area_credit_sum   = {a: 0 for a in areas}
+
         for c in courses:
-            credit = int(c.get("credit", 0) or 0)
-            mf = (c.get("major_field") or "").strip()
-            if mf in area_course_count:
-                area_course_count[mf] += 1
-                area_credit_sum[mf]   += credit
+            code = norm_code(c.get("code"))
+            cred = credit_from_map_or_course(c, code_credit_map)
+            for a in areas:
+                if code in S["dr_area"][a]:
+                    area_course_count[a] += 1
+                    area_credit_sum[a]   += cred
 
         covered_areas = [a for a in areas if area_course_count[a] >= 1]
         missing_areas = [a for a in areas if area_course_count[a] == 0]
 
-        # 영역별 상세 rows (프런트 시각화 용)
         rows = [
             {
                 "area": a,
@@ -499,22 +558,16 @@ class DrbolMissingView(generics.RetrieveAPIView):
             for a in areas
         ]
 
-        # 총 드볼 학점: 영역 합
         drbol_credit_total = int(sum(area_credit_sum.values()))
-
-        # 커버리지/학점 충족 판단
-        coverage_ok = len(covered_areas) >= required_areas_count
-
-        # 17학점 예외: 총 17학점이고, '커버된 영역' 중 적어도 하나의 합계가 2학점인 경우
         has_two_credit_area = any(area_credit_sum[a] == 2 for a in covered_areas)
-        credit_ok = (drbol_credit_total >= required_credit_total) or (
+        coverage_ok = len(covered_areas) >= required_areas_count
+        credit_ok = (drbol_credit_total >= requirement.drbol_required) or (
             drbol_credit_total == 17 and has_two_credit_area
         )
 
-        # 남은 커버 수/학점(예외 충족 시 학점 잔여 0으로 표기)
         areas_remaining = max(0, required_areas_count - len(covered_areas))
         credit_remaining = 0 if (drbol_credit_total == 17 and has_two_credit_area) \
-            else max(0, required_credit_total - drbol_credit_total)
+            else max(0, requirement.drbol_required - drbol_credit_total)
 
         return Response({
             "areas": rows,
@@ -524,7 +577,7 @@ class DrbolMissingView(generics.RetrieveAPIView):
             "missing_areas": missing_areas,
 
             "total_credit_completed": drbol_credit_total,
-            "total_credit_required": required_credit_total,
+            "total_credit_required": requirement.drbol_required,
             "credit_remaining": credit_remaining,
 
             "coverage_ok": coverage_ok,
@@ -534,7 +587,7 @@ class DrbolMissingView(generics.RetrieveAPIView):
 
 
 # ---------------------------
-# ✅ 10) 필수 과목 로드맵
+# 10) 필수 과목 로드맵 (code 기준)
 # ---------------------------
 class RequiredRoadmapView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -544,28 +597,27 @@ class RequiredRoadmapView(generics.RetrieveAPIView):
         if not user:
             return Response({"error": "사용자를 찾을 수 없습니다."}, status=404)
         transcript = Transcript.objects.filter(user_id=user_id).order_by("-created_at").first()
-        if not transcript or not (getattr(transcript, "parsed_data", None) or getattr(transcript, "parsed", None)):
+        if not transcript or not transcript.parsed_data:
             return Response({"error": "성적표 데이터가 없습니다."}, status=404)
         requirement = GraduationRequirement.objects.filter(major=user.major).first()
         if not requirement:
             return Response({"error": "졸업 요건 데이터가 없습니다."}, status=500)
 
         courses = get_valid_courses(transcript)
-        # 완료 맵: code -> taken_semester
         complete_map: dict[str, str] = {}
         for c in courses:
-            key = course_key_from_dict(c)
+            key = norm_code(c.get("code"))
             if key and key not in complete_map:
                 complete_map[key] = c.get("semester") or None
 
         def build(items: list[dict]) -> list[dict]:
             rows = []
             for it in (items or []):
-                key = course_key_from_dict(it)
+                key = norm_code(it.get("code"))
                 taken = complete_map.get(key)
                 rows.append({
-                    "code": it.get("code","") or "",
-                    "name": it.get("name","") or "",
+                    "code": it.get("code", "") or "",
+                    "name": it.get("name", "") or "",
                     "planned_semester": it.get("semester") or None,
                     "completed": taken is not None,
                     "taken_semester": taken
