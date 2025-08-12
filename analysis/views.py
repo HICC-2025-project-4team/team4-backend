@@ -5,17 +5,18 @@ from users.models import User
 from .models import GraduationRequirement
 from .serializers import GraduationStatusSerializer
 
+
+# ---------------------------
+# 유틸/공통 (코드 전용 비교)
+# ---------------------------
 import re
 import unicodedata
+from typing import Any, Dict, List
 
-
-# ---------------------------
-# 유틸/공통
-# ---------------------------
-ROMAN = {"Ⅰ": "1", "Ⅱ": "2", "Ⅲ": "3", "Ⅳ": "4", "Ⅴ": "5",
-         "Ⅵ": "6", "Ⅶ": "7", "Ⅷ": "8", "Ⅸ": "9"}
+ROMAN = {"Ⅰ":"1","Ⅱ":"2","Ⅲ":"3","Ⅳ":"4","Ⅴ":"5","Ⅵ":"6","Ⅶ":"7","Ⅷ":"8","Ⅸ":"9"}
 
 def _norm(s: str | None) -> str:
+    """(이름 비교가 필요할 때만 사용; 현재 키 비교는 code 전용)"""
     if not s:
         return ""
     s = unicodedata.normalize("NFKC", str(s)).strip().lower()
@@ -25,19 +26,17 @@ def _norm(s: str | None) -> str:
     s = re.sub(r"[\(\)\[\]\{\}\s]+", "", s)
     return s
 
-def course_key_from_dict(d: dict) -> str:
-    """비교 키: code 우선, 없으면 정규화된 name"""
-    code = (d.get("code") or "").strip()
-    if code:
-        return code
-    return _norm(d.get("name", ""))
+def norm_code(x) -> str:
+    """학수번호 정규화: 숫자만 남기고 6자리 zero-pad"""
+    s = re.sub(r"\D", "", str(x or ""))
+    return s.zfill(6) if s else ""
 
-def get_courses_from_parsed_data(parsed) -> list[dict]:
-    """
-    parsed_data 형태 안전하게 추출:
-    - 권장: {"courses":[{...}]}
-    - 과거: [{...}]
-    """
+def course_key_from_dict(d: Dict[str, Any]) -> str:
+    """비교 키: code만 사용 (이름 fallback 제거)"""
+    return norm_code(d.get("code"))
+
+def get_courses_from_parsed_data(parsed) -> List[Dict[str, Any]]:
+    """parsed_data 안전 추출"""
     if not parsed:
         return []
     if isinstance(parsed, dict):
@@ -46,16 +45,16 @@ def get_courses_from_parsed_data(parsed) -> list[dict]:
         return parsed
     return []
 
-def get_valid_courses(transcript: Transcript) -> list[dict]:
-    """F 성적 및 재수강 제외"""
-    all_courses = get_courses_from_parsed_data(transcript.parsed_data)
+def get_valid_courses(transcript) -> List[Dict[str, Any]]:
+    """F 및 재수강 제외(최신 통과 기록만 반영)"""
+    all_courses = get_courses_from_parsed_data(getattr(transcript, "parsed_data", None))
     return [
         c for c in all_courses
         if c and (c.get("grade") != "F") and (not c.get("retake", False))
     ]
 
-def distribute(total: int, n: int) -> list[int]:
-    """총합을 n개로 최대한 고르게 분배 (드볼 영역 요구학점 추정용)"""
+def distribute(total: int, n: int) -> List[int]:
+    """총합을 n개로 고르게 분배"""
     if n <= 0:
         return []
     base = total // n
@@ -64,6 +63,7 @@ def distribute(total: int, n: int) -> list[int]:
     for i in range(rem):
         arr[i] += 1
     return arr
+
 
 
 # ---------------------------
@@ -109,20 +109,62 @@ def analyze_graduation(user_id: int):
             "code": item.get("code", "") or "",
             "name": item.get("name", "") or ""
         })
-
-    # ---------- 드볼: 7개 영역 중 서로 다른 6개 영역 + 총 18학점 ----------
+    # ---------- 드볼: 7개 영역 중 서로 다른 6개 영역 + 총 18학점(예외: 17학점 + 2학점 영역 1개) ----------
     drbol_areas = [a.strip() for a in (requirement.drbol_areas or "").split(",") if a.strip()]
     required_areas_count = min(6, len(drbol_areas))  # 규칙: 7개 중 6개
-    # 영역별 수강 과목 수
+
+    # 영역별 수강 과목 수/학점
     area_course_count = {a: 0 for a in drbol_areas}
+    area_credits = {a: 0 for a in drbol_areas}
+    total_dvbol_credit = 0
+
     for c in courses:
-        mf = c.get("major_field") or ""
+        mf = (c.get("major_field") or "").strip()
         if mf in area_course_count:
             area_course_count[mf] += 1
+            area_credits[mf] += int(c.get("credit") or 0)
+            total_dvbol_credit += int(c.get("credit") or 0)
+
+    # 커버한/미커버 영역
     covered_areas = [a for a, cnt in area_course_count.items() if cnt >= 1]
     covered_count = len(covered_areas)
-    # 참고용: 아직 0과목인 영역 리스트
     missing_drbol_areas = [a for a in drbol_areas if area_course_count.get(a, 0) == 0]
+
+    # 17학점 예외: "총 17학점" 이고 "커버 영역 중 적어도 한 영역의 합계가 2학점"이면 OK
+    has_two_credit_area = any(area_credits.get(a, 0) == 2 for a in covered_areas)
+
+    coverage_ok = covered_count >= required_areas_count
+    credit_ok = (total_dvbol_credit >= 18) or (total_dvbol_credit == 17 and has_two_credit_area)
+
+    # 응답용 보조 값들
+    areas_remaining = max(required_areas_count - covered_count, 0)
+    credit_required = 18 if total_dvbol_credit < 18 else 18  # 표시는 18으로 고정
+    credit_remaining = max(0, 18 - total_dvbol_credit) if not (total_dvbol_credit == 17 and has_two_credit_area) else 0
+
+    # 영역별 상세(프런트 시각화용)
+    areas_detail = [
+        {
+            "area": a,
+            "covered": area_course_count[a] >= 1,
+            "courses_count": area_course_count[a],
+            "completed_credit": area_credits[a],
+        }
+        for a in drbol_areas
+    ]
+
+    dvbol_result = {
+        "areas": areas_detail,
+        "areas_required": required_areas_count,
+        "areas_covered": covered_count,
+        "areas_remaining": areas_remaining,
+        "missing_areas": missing_drbol_areas,
+        "total_credit_completed": total_dvbol_credit,
+        "total_credit_required": 18,
+        "credit_remaining": credit_remaining,
+        "coverage_ok": coverage_ok,
+        "credit_ok": credit_ok,
+        "status": coverage_ok and credit_ok,  # 최종 판정
+    }
 
     # ---------- 상태 판정 ----------
     status_flag = "complete"
@@ -248,10 +290,35 @@ class GeneralCreditView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, user_id):
-        result = analyze_graduation(user_id)
-        if "error" in result:
-            return Response({"error": result["error"]}, status=result["status"])
-        return Response({"general_credit": result["data"]["general_completed"]})
+        user = User.objects.filter(id=user_id).first()
+        if not user:
+            return Response({"error": "사용자를 찾을 수 없습니다."}, status=404)
+
+        transcript = Transcript.objects.filter(user_id=user_id).order_by("-created_at").first()
+        if not transcript or not transcript.parsed_data:
+            return Response({"general_credit": 0}, status=200)
+
+        # 졸업요건에서 드볼 영역명 리스트 가져오기
+        req = GraduationRequirement.objects.filter(major=user.major).first()
+        drbol_areas = []
+        if req and req.drbol_areas:
+            drbol_areas = [a.strip() for a in req.drbol_areas.split(",") if a.strip()]
+
+        courses = transcript.parsed_data.get("courses", [])
+        general_credit = 0
+
+        for c in courses:
+            ctype  = (c.get("type") or "").strip()                # 예: 교양 / 드볼 / 특성화교양 / 전공
+            mfield = (c.get("major_field") or "").strip()         # 예: 교양필수 / 교양선택 / 드볼 영역명 등
+            credit = int(c.get("credit") or 0)
+
+            is_general_type  = ctype in {"교양", "드볼", "특성화교양"}
+            is_general_field = mfield in {"교양필수", "교양선택", "특성화교양"} or mfield in drbol_areas
+
+            if credit > 0 and (is_general_type or is_general_field):
+                general_credit += credit
+
+        return Response({"general_credit": general_credit}, status=200)
 
 
 class MajorCreditView(generics.RetrieveAPIView):
@@ -373,24 +440,50 @@ class DrbolMissingView(generics.RetrieveAPIView):
         covered_areas = [a for a in areas if area_course_count[a] >= 1]
         missing_areas = [a for a in areas if area_course_count[a] == 0]
 
-        rows = []
-        for a in areas:
-            rows.append({
+        # 영역별 상세 rows (프론트 시각화 용)
+        rows = [
+            {
                 "area": a,
                 "covered": area_course_count[a] >= 1,
                 "courses_count": area_course_count[a],
-                "completed_credit": area_credit_sum[a],
-            })
+                "completed_credit": int(area_credit_sum[a]),
+            }
+            for a in areas
+        ]
+
+        # 총 드볼 학점은 '드볼' 타입 문자열에 의존하지 말고, 영역합으로 계산(더 안전)
+        drbol_credit_total = int(sum(area_credit_sum.values()))
+
+        # 커버리지/학점 충족 판단
+        required_areas_count = min(6, len(areas))  # 7개 정의돼도 규칙은 6개 커버
+        coverage_ok = len(covered_areas) >= required_areas_count
+
+        # 17학점 예외: 총 17학점이고, '커버된 영역' 중 적어도 하나의 합계가 2학점인 경우
+        has_two_credit_area = any(area_credit_sum[a] == 2 for a in covered_areas)
+        credit_ok = (drbol_credit_total >= required_credit_total) or (
+            drbol_credit_total == 17 and has_two_credit_area
+        )
+
+        # 남은 커버 수/학점(예외 충족 시 학점 잔여 0으로 표기)
+        areas_remaining = max(0, required_areas_count - len(covered_areas))
+        credit_remaining = 0 if (drbol_credit_total == 17 and has_two_credit_area) \
+            else max(0, required_credit_total - drbol_credit_total)
 
         return Response({
             "areas": rows,
-            "areas_required": required_areas_count,                      # 최소 커버해야 하는 영역 수(6)
+            "areas_required": required_areas_count,
             "areas_covered": len(covered_areas),
-            "areas_remaining": max(0, required_areas_count - len(covered_areas)),
+            "areas_remaining": areas_remaining,
             "missing_areas": missing_areas,
-            "total_credit_completed": drbol_credit_total,                # 드볼 총 이수 학점
-            "total_credit_required": required_credit_total,              # 18
-            "credit_remaining": max(0, required_credit_total - drbol_credit_total),
+
+            "total_credit_completed": drbol_credit_total,
+            "total_credit_required": required_credit_total,   # 보통 18
+            "credit_remaining": credit_remaining,
+
+            # 판단 플래그 + 최종 판정도 같이 내려주면 Postman에서 보기 편함
+            "coverage_ok": coverage_ok,
+            "credit_ok": credit_ok,
+            "status": (coverage_ok and credit_ok)
         }, status=status.HTTP_200_OK)
 
 

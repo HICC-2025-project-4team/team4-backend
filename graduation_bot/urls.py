@@ -23,8 +23,8 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/users/', include('users.urls')),
     path('api/transcripts/', include('transcripts.urls')),
-    #path('api/analysis/', include('analysis.urls')),
-    #path('api/semesters/', include('semesters.urls')),
+    path('api/analysis/', include('analysis.urls')),
+    path('api/semesters/', include('semesters.urls')),
     # 이후 transcripts/, analysis/, semesters/ 앱도 같은 방식으로 연결
 ]
 

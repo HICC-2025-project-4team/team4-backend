@@ -1,5 +1,4 @@
 import re
-import cv2
 from collections import OrderedDict, defaultdict
 from paddleocr import PaddleOCR
 
