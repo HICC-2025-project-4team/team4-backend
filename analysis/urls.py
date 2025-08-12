@@ -29,6 +29,6 @@ urlpatterns = [
 
     # ✅ 추가 기능
     path('required/missing/<int:user_id>/',  RequiredMissingView.as_view()),
-    path('dvbol/missing/<int:user_id>/',     DrbolMissingView.as_view()),
+    path('drbol/missing/<int:user_id>/',     DrbolMissingView.as_view()),
     path('required/roadmap/<int:user_id>/',  RequiredRoadmapView.as_view()),
 ]
