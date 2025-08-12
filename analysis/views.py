@@ -419,12 +419,44 @@ class StatisticsCreditView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, user_id):
+        # major_rate는 기존처럼 학점 기반 사용
         result = analyze_graduation(user_id)
         if "error" in result:
             return Response({"error": result["error"]}, status=result["status"])
         d = result["data"]
-        general_rate = d["general_completed"] / d["general_required"] if d["general_required"] else 0
-        major_rate = d["major_completed"] / d["major_required"] if d["major_required"] else 0
+        major_rate = d["major_completed"] / d["major_required"] if d["major_required"] else 0.0
+
+        # ✅ general_rate는 '교양 필수 그룹 충족률'로 계산
+        user = User.objects.filter(id=user_id).first()
+        req = GraduationRequirement.objects.filter(major=user.major).first() if user else None
+        transcript = Transcript.objects.filter(user_id=user_id).order_by("-created_at").first()
+        if not req or not transcript or not transcript.parsed_data:
+            return Response({"general_rate": 0.0, "major_rate": major_rate}, status=200)
+
+        courses = get_valid_courses(transcript)
+        taken_codes = { norm_code(c.get("code")) for c in courses if c.get("code") }
+
+        # (1)/(2) 같은 대체코드는 같은 그룹으로 묶기
+        import re
+        def group_key(name: str) -> str:
+            if not name:
+                return ""
+            m = re.match(r"^(.*?)(?:\(\s*\d+\s*\))$", name.strip())
+            return (m.group(1) if m else name.strip())
+
+        # 이름 그룹 -> 코드셋
+        groups: dict[str, set[str]] = {}
+        for i in (req.general_must_courses or []):
+            name = group_key(i.get("name", ""))
+            code = norm_code(i.get("code"))
+            if not name or not code:
+                continue
+            groups.setdefault(name, set()).add(code)
+
+        total_groups = len(groups)
+        completed_groups = sum(1 for codes in groups.values() if (codes & taken_codes))
+        general_rate = (completed_groups / total_groups) if total_groups else 0.0
+
         return Response({"general_rate": general_rate, "major_rate": major_rate})
 
 
