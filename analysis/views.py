@@ -628,21 +628,26 @@ class RequiredRoadmapView(generics.RetrieveAPIView):
         user = User.objects.filter(id=user_id).first()
         if not user:
             return Response({"error": "사용자를 찾을 수 없습니다."}, status=404)
+
         transcript = Transcript.objects.filter(user_id=user_id).order_by("-created_at").first()
         if not transcript or not transcript.parsed_data:
             return Response({"error": "성적표 데이터가 없습니다."}, status=404)
+
         requirement = GraduationRequirement.objects.filter(major=user.major).first()
         if not requirement:
             return Response({"error": "졸업 요건 데이터가 없습니다."}, status=500)
 
         courses = get_valid_courses(transcript)
-        complete_map: dict[str, str] = {}
+
+        # 완료 맵: code -> taken_semester
+        complete_map: dict[str, str | None] = {}
         for c in courses:
             key = norm_code(c.get("code"))
             if key and key not in complete_map:
                 complete_map[key] = c.get("semester") or None
 
-        def build(items: list[dict]) -> list[dict]:
+        # 전공 필수: 코드 단위 그대로 표시
+        def build_major(items: list[dict]) -> list[dict]:
             rows = []
             for it in (items or []):
                 key = norm_code(it.get("code"))
@@ -656,8 +661,46 @@ class RequiredRoadmapView(generics.RetrieveAPIView):
                 })
             return rows
 
-        major_roadmap = build(requirement.major_must_courses)
-        general_roadmap = build(requirement.general_must_courses)
+        major_roadmap = build_major(requirement.major_must_courses)
+
+        # 교양 필수: 같은 과목군(예: 논리적사고와글쓰기 001011~001015, 전공기초영어(1)/(2))은 그룹 OR로 표시
+        from collections import OrderedDict
+        import re
+
+        def group_key(name: str) -> str:
+            if not name:
+                return ""
+            # 이름 뒤 괄호 숫자 (1)/(2) 등 제거 → 같은 그룹으로 묶기
+            m = re.match(r"^(.*?)(?:\(\s*\d+\s*\))$", name.strip())
+            return (m.group(1) if m else name.strip())
+
+        # 1) 그룹 구성: 그룹명 -> 해당 항목들
+        groups: "OrderedDict[str, list[dict]]" = OrderedDict()
+        for it in (requirement.general_must_courses or []):
+            gname = group_key(it.get("name", ""))
+            code = norm_code(it.get("code"))
+            if not gname or not code:
+                continue
+            groups.setdefault(gname, []).append(it)
+
+        # 2) 그룹 OR 판정: 그룹 내 코드 중 하나라도 이수했으면 completed=True
+        general_roadmap: list[dict] = []
+        for gname, items in groups.items():
+            hit_code = next(
+                (norm_code(x.get("code")) for x in items if norm_code(x.get("code")) in complete_map),
+                None
+            )
+            taken_semester = complete_map.get(hit_code) if hit_code else None
+            # 대표 행: 수강한 코드가 있으면 그 항목, 없으면 첫 항목
+            rep = next((x for x in items if norm_code(x.get("code")) == hit_code), items[0])
+
+            general_roadmap.append({
+                "code": rep.get("code", "") or "",
+                "name": gname,  # 그룹명으로 표시 (예: '논리적사고와글쓰기', '전공기초영어')
+                "planned_semester": rep.get("semester") or None,
+                "completed": bool(hit_code),
+                "taken_semester": taken_semester
+            })
 
         return Response({
             "major_required_roadmap": major_roadmap,
