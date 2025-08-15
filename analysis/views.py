@@ -34,6 +34,17 @@ class GeneralCreditView(BaseAnalysisView):
 class MajorCreditView(BaseAnalysisView):
     def handle_response(self, service):
         return Response({"major_credit": service.analysis_result.get("major_completed", 0)})
+    
+class CreditStatusView(BaseAnalysisView):
+    def handle_response(self, service):
+        return Response({
+            "major_completed":  service.analysis_result.get("major_completed", 0),
+            "general_completed": service.analysis_result.get("general_completed", 0),
+            "drbol_completed":  service.analysis_result.get("drbol_completed", 0),
+            "sw_completed":     service.analysis_result.get("sw_completed", 0),
+            "msc_completed":    service.analysis_result.get("msc_completed", 0),
+            "special_general_completed": service.analysis_result.get("special_general_completed", 0),
+        })
 
 class StatisticsCreditView(BaseAnalysisView):
     def handle_response(self, service):

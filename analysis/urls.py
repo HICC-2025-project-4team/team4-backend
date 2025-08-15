@@ -5,6 +5,7 @@ from .views import (
     TotalCreditView,
     GeneralCreditView,
     MajorCreditView,
+    CreditStatusView,
     StatisticsCreditView,
     GraduationStatusView,
     RequiredMissingView,
@@ -23,6 +24,7 @@ urlpatterns = [
     path('credit/total/<int:user_id>/', TotalCreditView.as_view(), name='credit_total'),
     path('credit/general/<int:user_id>/', GeneralCreditView.as_view(), name='credit_general'),
     path('credit/major/<int:user_id>/', MajorCreditView.as_view(), name='credit_major'),
+    path('credit/part/<int:user_id>/', CreditStatusView.as_view()),
 
     # 6) 이수율 시각화
     path('credit/statistics/<int:user_id>/', StatisticsCreditView.as_view(), name='credit_statistics'),

@@ -5,6 +5,7 @@ from .views import (
     SemesterMissingRequiredView,
     AllMissingRequiredCoursesView,
     MissingRequiredBySemesterView,
+    SemesterOnlyListView,
 )
 
 app_name = 'semesters'
@@ -26,4 +27,6 @@ urlpatterns = [
 
     # 6) 학기별 전공필수 미이수 타임라인
     path('courses/missing-required/by-semester/<int:user_id>/', MissingRequiredBySemesterView.as_view(), name='missing_required_by_semester'),
+
+    path('list-only/<int:user_id>/', SemesterOnlyListView.as_view()),
 ]
