@@ -1,3 +1,5 @@
+# custom_paddle_ocr_script.py
+
 import re
 from collections import OrderedDict, defaultdict
 from paddleocr import PaddleOCR
@@ -10,6 +12,16 @@ FOOTERS = {"신청학점", "전체성적", "취득학점", "증명평점", "백�
 _TERM_ANY = re.compile(r'(?P<y>\d{4})\s*학년도.*?(?P<g>\d)\s*학년.*?(?P<s>\d)\s*학기')
 PLUS_CANDS = {"+", "＋", "﹢", "十", "†", "ᐩ", "t", "T"}
 ZERO_CANDS = {"0", "O", "〇", "○", "◯"}
+
+# --- Debug 스위치 & 통계 출력 헬퍼 ---
+DEBUG = True
+
+def _print_score_stats(items, label=""):
+    """run_ocr()가 반환한 dict 리스트에서 score 통계를 출력"""
+    if not items:
+        print(f"[{label}] no items"); return
+    scores = [float(it.get("score", 0.0)) for it in items]
+    print(f"[{label}] n={len(items)} avg={np.mean(scores):.3f} min={np.min(scores):.3f} max={np.max(scores):.3f}")
 
 # --- 이미지 전처리 ---
 def _preprocess_image_for_ocr(image_obj, sharpen=False, scale_factor=2):
@@ -25,7 +37,11 @@ def _preprocess_image_for_ocr(image_obj, sharpen=False, scale_factor=2):
         sharpened = gray
 
     if scale_factor > 1:
-        resized = cv2.resize(sharpened, (int(gray.shape[1] * scale_factor), int(gray.shape[0] * scale_factor)), interpolation=cv2.INTER_CUBIC)
+        resized = cv2.resize(
+            sharpened,
+            (int(gray.shape[1] * scale_factor), int(gray.shape[0] * scale_factor)),
+            interpolation=cv2.INTER_CUBIC
+        )
     else:
         resized = sharpened
     
@@ -37,28 +53,46 @@ class MyPaddleOCR:
     def __init__(self, lang: str="korean", min_score: float=0.15, **kwargs):
         self.lang = lang
         self.min_score = float(min_score)
-        self._ocr = PaddleOCR(lang=self.lang, use_angle_cls=True, table=True, drop_score=0.1, det_db_box_thresh=0.3, det_db_unclip_ratio=1.6, **kwargs)
+        self._ocr = PaddleOCR(
+            lang=self.lang, use_angle_cls=True, table=True,
+            drop_score=0.1, det_db_box_thresh=0.3, det_db_unclip_ratio=1.6, **kwargs
+        )
 
     def run_ocr(self, image_input, preprocess_info=None) -> list[dict]:
         if preprocess_info:
-             image_to_process = _preprocess_image_for_ocr(image_input, **preprocess_info)
+            image_to_process = _preprocess_image_for_ocr(image_input, **preprocess_info)
         else:
-             image_to_process = image_input
+            image_to_process = image_input
 
         result = self._ocr.ocr(image_to_process, cls=True)
         ocr_result = result[0] if result and isinstance(result, list) else []
         
         items = []
-        for poly, (txt, score) in ocr_result:
-            if score is not None and score < self.min_score: continue
+        for entry in ocr_result:
+            try:
+                poly, (txt, score) = entry
+            except Exception:
+                continue
+
+            if score is not None and score < self.min_score:
+                continue
             
             scale = preprocess_info.get('scale_factor', 1) if preprocess_info else 1
-            scaled_poly = [(p[0] / scale, p[1] / scale) for p in poly]
+            try:
+                scaled_poly = [(p[0] / scale, p[1] / scale) for p in poly]
+            except Exception:
+                continue
             
             x_coords = [p[0] for p in scaled_poly]; y_coords = [p[1] for p in scaled_poly]
             bbox = (min(x_coords), min(y_coords), max(x_coords), max(y_coords))
             cx = (bbox[0] + bbox[2]) / 2.0; cy = (bbox[1] + bbox[3]) / 2.0; h = bbox[3] - bbox[1]
-            items.append({"txt": txt.strip(), "bbox": bbox, "cx": cx, "cy": cy, "h": h})
+            item = {"txt": txt.strip(), "bbox": bbox, "cx": cx, "cy": cy, "h": h,
+                    "score": float(score) if score is not None else 0.0}
+            items.append(item)
+
+            if DEBUG:
+                print(f"[OCR] '{item['txt']}' score={item['score']:.3f} "
+                      f"bbox=({bbox[0]:.1f},{bbox[1]:.1f},{bbox[2]:.1f},{bbox[3]:.1f})")
         return items
 
 ocr = MyPaddleOCR(min_score=0.15)
@@ -70,7 +104,6 @@ def _find_code_in_tok(tok: str) -> str | None:
     return match.group(1) if match else None
 
 def _extract_grade_from_tokens(tokens: list[str]) -> str | None:
-    # ... (이전과 동일)
     if not tokens: return None
     text = "".join(tokens).upper().replace(" ", "")
     for char in PLUS_CANDS: text = text.replace(char, "+")
@@ -100,9 +133,13 @@ def _match_header_key(txt: str) -> str | None:
 # --- 메인 파싱 로직 ---
 def ocr_single_table_term_code_grade_retake(image_path: str) -> list[dict]:
     original_image = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if original_image is None:
+        raise FileNotFoundError(f"이미지를 열 수 없습니다: {image_path}")
     
     # 1. 1차 스캔 (원본): 구조(학기, 헤더 위치) 파악
     original_items = ocr.run_ocr(original_image, preprocess_info=None)
+    if DEBUG:
+        _print_score_stats(original_items, "original/raw")
     if not original_items: return []
 
     full_text = " ".join(it['txt'] for it in original_items)
@@ -114,6 +151,8 @@ def ocr_single_table_term_code_grade_retake(image_path: str) -> list[dict]:
 
     # 2. 2차 스캔 (전처리): 내용(과목 전체) 파악
     processed_items = ocr.run_ocr(original_image, preprocess_info={'sharpen': True, 'scale_factor': 2})
+    if DEBUG:
+        _print_score_stats(processed_items, "processed/sharpen+scale2")
 
     # 3. 행(Row)으로 그룹화
     data_items = [it for it in processed_items if it['cy'] > header_y]
@@ -133,12 +172,13 @@ def ocr_single_table_term_code_grade_retake(image_path: str) -> list[dict]:
             
             y_start, y_end = int(avg_y - 12), int(avg_y + 12)
             x_start, x_end = int(col_x_code - 40), int(col_x_code + 40)
-            
             code_roi = original_image[y_start:y_end, x_start:x_end]
             
             if code_roi.size > 0:
                 # 핀포인트 OCR
                 pinpoint_items = ocr.run_ocr(code_roi, preprocess_info={'sharpen': True, 'scale_factor': 4})
+                if DEBUG:
+                    _print_score_stats(pinpoint_items, f"pinpoint/code y≈{avg_y:.1f}")
                 if pinpoint_items:
                     code = _find_code_in_tok("".join(it['txt'] for it in pinpoint_items))
 
@@ -146,7 +186,8 @@ def ocr_single_table_term_code_grade_retake(image_path: str) -> list[dict]:
         if not code:
             code = _find_code_in_tok(" ".join(it['txt'] for it in row_items))
 
-        if not code: continue
+        if not code: 
+            continue
 
         grade = _extract_grade_from_tokens([it['txt'] for it in row_items])
         retake = _extract_retake_from_tokens([it['txt'] for it in row_items])
